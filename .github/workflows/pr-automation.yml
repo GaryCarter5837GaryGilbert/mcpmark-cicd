@@ -1,0 +1,416 @@
+name: PR Automation
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  code-quality:
+    name: code-quality
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+      
+      - name: Install dependencies
+        run: npm ci
+      
+      - name: Run ESLint
+        run: |
+          npm run lint > eslint-results.txt 2>&1
+          echo "ESLINT_EXIT_CODE=$?" >> $GITHUB_ENV
+      
+      - name: Check Prettier formatting
+        run: |
+          npx prettier --check . > prettier-results.txt 2>&1
+          echo "PRETTIER_EXIT_CODE=$?" >> $GITHUB_ENV
+      
+      - name: Read results
+        id: results
+        run: |
+          ESLINT_RESULTS=$(cat eslint-results.txt)
+          PRETTIER_RESULTS=$(cat prettier-results.txt)
+          echo "eslint_results<<EOF" >> $GITHUB_OUTPUT
+          echo "$ESLINT_RESULTS" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+          echo "prettier_results<<EOF" >> $GITHUB_OUTPUT
+          echo "$PRETTIER_RESULTS" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+      
+      - name: Post Code Quality Report
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const eslintResults = `${{ steps.results.outputs.eslint_results }}`;
+            const prettierResults = `${{ steps.results.outputs.prettier_results }}`;
+            const eslintExitCode = ${{ env.ESLINT_EXIT_CODE }};
+            const prettierExitCode = ${{ env.PRETTIER_EXIT_CODE }};
+            
+            let commentBody = "## Code Quality Report\n";
+            
+            // ESLint Section
+            commentBody += "### ESLint\n";
+            if (eslintExitCode === 0) {
+              commentBody += "✅ No ESLint issues found\n";
+            } else {
+              commentBody += "❌ ESLint issues found:\n```\n" + eslintResults + "\n```\n";
+            }
+            
+            // Prettier Section
+            commentBody += "### Prettier\n";
+            if (prettierExitCode === 0) {
+              commentBody += "✅ No Prettier formatting issues found\n";
+            } else {
+              commentBody += "❌ Prettier formatting issues found:\n```\n" + prettierResults + "\n```\n";
+            }
+            
+            // Check for existing comment to avoid duplicates
+            const comments = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            
+            const existingComment = comments.data.find(comment => 
+              comment.body.startsWith("## Code Quality Report")
+            );
+            
+            if (existingComment) {
+              // Update existing comment
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existingComment.id,
+                body: commentBody
+              });
+            } else {
+              // Create new comment
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: commentBody
+              });
+            }
+
+  testing-suite:
+    name: testing-suite
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+      
+      - name: Install dependencies
+        run: npm ci
+      
+      - name: Run tests with coverage
+        run: |
+          npm test -- --coverage > test-results.txt 2>&1
+          echo "TEST_EXIT_CODE=$?" >> $GITHUB_ENV
+      
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage/
+          retention-days: 7
+      
+      - name: Read test results
+        id: test-results
+        run: |
+          TEST_RESULTS=$(cat test-results.txt)
+          echo "test_results<<EOF" >> $GITHUB_OUTPUT
+          echo "$TEST_RESULTS" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+      
+      - name: Post Test Coverage Report
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const testResults = `${{ steps.test-results.outputs.test_results }}`;
+            const testExitCode = ${{ env.TEST_EXIT_CODE }};
+            
+            let commentBody = "## Test Coverage Report\n";
+            
+            // Test Results Section
+            commentBody += "### Test Execution Results\n";
+            if (testExitCode === 0) {
+              commentBody += "✅ All tests passed!\n";
+            } else {
+              commentBody += "❌ Some tests failed:\n";
+            }
+            commentBody += "```\n" + testResults + "\n```\n";
+            
+            // Coverage Summary Section
+            commentBody += "### Coverage Summary\n";
+            const coverageSummary = testResults.match(/Coverage summary.*?\n\n/s)?.[0] || "No coverage summary found in test output";
+            commentBody += "```\n" + coverageSummary + "\n```\n";
+            
+            // Check for existing comment
+            const comments = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            
+            const existingComment = comments.data.find(comment => 
+              comment.body.startsWith("## Test Coverage Report")
+            );
+            
+            if (existingComment) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existingComment.id,
+                body: commentBody
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: commentBody
+              });
+            }
+
+  security-scan:
+    name: security-scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+      
+      - name: Install dependencies
+        run: npm ci
+      
+      - name: Install jq
+        run: sudo apt-get install -y jq
+      
+      - name: Check dependency vulnerabilities (npm audit)
+        run: |
+          npm audit --json > npm-audit.json 2>&1 || true
+      
+      - name: Scan for secrets
+        uses: trufflesecurity/trufflehog@v3.61.2
+        with:
+          path: .
+          output: secret-scan-results.txt
+          format: text
+          no-verification: true
+      
+      - name: Process security results
+        id: security-results
+        run: |
+          # Process npm audit results
+          if [ -f npm-audit.json ]; then
+            NPM_AUDIT_SUMMARY=$(jq -r '
+              .metadata.vulnerabilities 
+              | to_entries 
+              | map("\(.key): \(.value)") 
+              | join("\n")
+            ' npm-audit.json)
+            
+            if [ -z "$NPM_AUDIT_SUMMARY" ] || [ "$NPM_AUDIT_SUMMARY" = "null" ]; then
+              NPM_AUDIT_SUMMARY="✅ No dependency vulnerabilities found"
+            else
+              NPM_AUDIT_SUMMARY="❌ Dependency vulnerabilities found:\n$NPM_AUDIT_SUMMARY"
+            fi
+          else
+            NPM_AUDIT_SUMMARY="⚠️ npm audit failed to generate results"
+          fi
+          
+          # Process secret scan results
+          if [ -f secret-scan-results.txt ]; then
+            SECRET_SCAN_RESULTS=$(cat secret-scan-results.txt)
+            if [ -z "$SECRET_SCAN_RESULTS" ]; then
+              SECRET_SCAN_RESULTS="✅ No secrets found in code changes"
+            else
+              SECRET_SCAN_RESULTS="❌ Secrets found in code changes:\n```\n$SECRET_SCAN_RESULTS\n```"
+            fi
+          else
+            SECRET_SCAN_RESULTS="⚠️ Secret scan failed to generate results"
+          fi
+          
+          # Output results to GitHub Actions
+          echo "npm_audit_summary<<EOF" >> $GITHUB_OUTPUT
+          echo "$NPM_AUDIT_SUMMARY" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+          
+          echo "secret_scan_results<<EOF" >> $GITHUB_OUTPUT
+          echo "$SECRET_SCAN_RESULTS" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+      
+      - name: Post Security Scan Report
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const npmAuditSummary = `${{ steps.security-results.outputs.npm_audit_summary }}`;
+            const secretScanResults = `${{ steps.security-results.outputs.secret_scan_results }}`;
+            
+            let commentBody = "## Security Scan Report\n";
+            
+            // Dependencies Section
+            commentBody += "### Dependencies (npm audit)\n";
+            commentBody += npmAuditSummary + "\n";
+            
+            // Secrets Section
+            commentBody += "### Secrets Scan\n";
+            commentBody += secretScanResults + "\n";
+            
+            // Check for existing comment
+            const comments = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            
+            const existingComment = comments.data.find(comment => 
+              comment.body.startsWith("## Security Scan Report")
+            );
+            
+            if (existingComment) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existingComment.id,
+                body: commentBody
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: commentBody
+              });
+            }
+
+  build-validation:
+    name: build-validation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+      
+      - name: Install dependencies
+        run: npm ci
+      
+      - name: Build application
+        run: |
+          npm run build > build-results.txt 2>&1
+          echo "BUILD_EXIT_CODE=$?" >> $GITHUB_ENV
+      
+      - name: Validate endpoints
+        run: |
+          # Start the application in the background
+          npm start &
+          APP_PID=$!
+          
+          # Wait for server to initialize
+          sleep 10
+          
+          # Validate main endpoint (adjust port/path as needed for your app)
+          curl -I http://localhost:3000 > endpoint-results.txt 2>&1
+          echo "ENDPOINT_EXIT_CODE=$?" >> $GITHUB_ENV
+          
+          # Stop the application
+          kill $APP_PID
+      
+      - name: Upload deployment preview artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-preview
+          path: dist/
+          retention-days: 7
+      
+      - name: Read build and endpoint results
+        id: build-results
+        run: |
+          BUILD_RESULTS=$(cat build-results.txt)
+          ENDPOINT_RESULTS=$(cat endpoint-results.txt)
+          
+          echo "build_results<<EOF" >> $GITHUB_OUTPUT
+          echo "$BUILD_RESULTS" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+          
+          echo "endpoint_results<<EOF" >> $GITHUB_OUTPUT
+          echo "$ENDPOINT_RESULTS" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+      
+      - name: Post Build Validation Report
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const buildResults = `${{ steps.build-results.outputs.build_results }}`;
+            const endpointResults = `${{ steps.build-results.outputs.endpoint_results }}`;
+            const buildExitCode = ${{ env.BUILD_EXIT_CODE }};
+            const endpointExitCode = ${{ env.ENDPOINT_EXIT_CODE }};
+            
+            let commentBody = "## Build Validation\n";
+            
+            // Build Results Section
+            commentBody += "### Build Process\n";
+            if (buildExitCode === 0) {
+              commentBody += "✅ Application built successfully!\n";
+            } else {
+              commentBody += "❌ Build failed:\n";
+            }
+            commentBody += "```\n" + buildResults + "\n```\n";
+            
+            // Endpoint Validation Section
+            commentBody += "### Endpoint Validation\n";
+            if (endpointExitCode === 0) {
+              commentBody += "✅ Main endpoint is accessible:\n";
+            } else {
+              commentBody += "❌ Main endpoint validation failed:\n";
+            }
+            commentBody += "```\n" + endpointResults + "\n```\n";
+            
+            // Check for existing comment
+            const comments = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            
+            const existingComment = comments.data.find(comment => 
+              comment.body.startsWith("## Build Validation")
+            );
+            
+            if (existingComment) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existingComment.id,
+                body: commentBody
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: commentBody
+              });
+            }
